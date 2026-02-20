@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres:16
+    platform: linux/amd64
+    image: postgis/postgis:18-3.6
     env_file: ".env"
     volumes:
       - ./volumes/pgdata:/var/lib/postgresql/data
