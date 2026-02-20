@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:16
+    env_file: ".env"
+    volumes:
+      - ./volumes/pgdata:/var/lib/postgresql/data
+      - ./volumes/pgsocket:/var/run/postgresql
+      - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+
+  backup:
+    build: .
+    depends_on:
+      - postgres
+    env_file: ".env"
+    volumes:
+      - ./volumes/pgdata:/var/lib/postgresql:ro
+      - ./volumes/pgsocket:/var/run/postgresql
+      - ./volumes/backup_state:/state

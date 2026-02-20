@@ -22,6 +22,8 @@ set -euo pipefail
 # Scheduling / retries
 # -------------------------
 : "${BACKUP_EVERY_DAYS:=1}"
+: "${FULL_BACKUP_EVERY_DAYS:=7}"
+: "${BACKUP_RETAIN_DAYS:=38}"
 : "${CHECK_EVERY_MINUTES:=10}"
 : "${JITTER_MAX_SECONDS:=900}"
 : "${MAX_RETRIES:=5}"
@@ -99,11 +101,11 @@ repo1-s3-region=us-east-1
 repo1-s3-uri-style=path
 
 # prefix backups by stack
-repo1-path=/${STACK_NAME}
+repo1-path=pg/${STACK_NAME}/${POSTGRES_DB}
 
-# retain at most Y full backups
-repo1-retention-full=${BACKUP_RETAIN_COUNT}
-repo1-retention-full-type=count
+# retain full backups for N days (and their dependent diffs)
+repo1-retention-full=${BACKUP_RETAIN_DAYS}
+repo1-retention-full-type=time
 
 # optional: compress repo data
 compress-type=zst
@@ -122,6 +124,25 @@ ensure_stanza() {
   if ! pgbackrest --stanza="main" info >/dev/null 2>&1; then
     pgbackrest --stanza="main" stanza-create
   fi
+}
+
+needs_full_backup() {
+  local last_full_epoch
+  last_full_epoch=$(pgbackrest --stanza="main" info --output=json \
+    | jq -r '
+      .[0].backup
+      | map(select(.type == "full"))
+      | last
+      | .timestamp.stop // 0
+    ' 2>/dev/null || echo 0)
+
+  if [[ "${last_full_epoch}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local age=$(( $(now_epoch) - last_full_epoch ))
+  local threshold=$(( FULL_BACKUP_EVERY_DAYS * 86400 ))
+  [[ "${age}" -ge "${threshold}" ]]
 }
 
 latest_backup_stats() {
@@ -148,11 +169,15 @@ do_backup() {
   start_iso="$(date -Is)"
   start_epoch="$(now_epoch)"
 
-  # Run FULL backups so retention count means “versions”
-  local out_file="${LOG_DIR}/backup_$(date +%F_%H%M%S).log"
+  local backup_type="diff"
+  if needs_full_backup; then
+    backup_type="full"
+  fi
+
+  local out_file=""${LOG_DIR}/backup_$(date +%F_%H%M%S).log""
 
   set +e
-  pgbackrest --stanza="main" backup --type=full >"${out_file}" 2>&1
+  pgbackrest --stanza="main" backup --type="${backup_type}" >"{out_file}" 2>&1
   local rc=$?
   set -e
 
@@ -163,7 +188,7 @@ do_backup() {
     echo "${end_epoch}" > "${LAST_OK_FILE}"
     local stats
     stats="$(latest_backup_stats)"
-    tg_send "✅ Backup SUCCESS
+    tg_send "✅ Backup SUCCESS (${backup_type})
 stack=${STACK_NAME}
 started=${start_iso}
 duration=${duration}s
@@ -173,7 +198,7 @@ ${stats}"
     # Include the tail of the log as the “reason”
     local reason
     reason="$(tail -n 25 "${out_file}" | sed 's/\r$//' | head -c 3500)"
-    tg_send "❌ Backup FAILED
+    tg_send "❌ Backup FAILED (${backup_type})
 stack=${STACK_NAME}
 started=${start_iso}
 duration=${duration}s
