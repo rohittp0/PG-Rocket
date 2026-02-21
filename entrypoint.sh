@@ -76,14 +76,14 @@ write_pgpass() {
 }
 
 write_pgbackrest_conf() {
-  # pg1-path must match where Postgres keeps PGDATA.
-  # Your volume mount is /var/lib/postgresql; official images typically use /var/lib/postgresql/data.
-  local pgdata="/var/lib/postgresql/data"
-  if [[ ! -d "${pgdata}" ]]; then
-    # fallback (some setups put PGDATA directly under the mount)
-    pgdata="/var/lib/postgresql"
+  local pgdata
+  pgdata="$(find /var/lib/postgresql -maxdepth 3 -name PG_VERSION -exec dirname {} \; 2>/dev/null | head -1)"
+  if [[ -z "${pgdata}" ]]; then
+    echo "ERROR: Could not locate PostgreSQL data directory under /var/lib/postgresql" >&2
+    return 1
   fi
 
+  mkdir -p /etc/pgbackrest
   cat > /etc/pgbackrest/pgbackrest.conf <<EOF
 [global]
 # logs inside /state (persist across restarts)
@@ -101,7 +101,7 @@ repo1-s3-region=us-east-1
 repo1-s3-uri-style=path
 
 # prefix backups by stack
-repo1-path=pg/${STACK_NAME}/${POSTGRES_DB}
+repo1-path=/pg/${STACK_NAME}/${POSTGRES_DB}
 
 # retain full backups for N days (and their dependent diffs)
 repo1-retention-full=${BACKUP_RETAIN_DAYS}
@@ -174,10 +174,10 @@ do_backup() {
     backup_type="full"
   fi
 
-  local out_file=""${LOG_DIR}/backup_$(date +%F_%H%M%S).log""
+  local out_file="${LOG_DIR}/backup_$(date +%F_%H%M%S).log"
 
   set +e
-  pgbackrest --stanza="main" backup --type="${backup_type}" >"{out_file}" 2>&1
+  pgbackrest --stanza="main" backup --type="${backup_type}" >"${out_file}" 2>&1
   local rc=$?
   set -e
 

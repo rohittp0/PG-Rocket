@@ -4,7 +4,7 @@ services:
     image: postgis/postgis:18-3.6
     env_file: ".env"
     volumes:
-      - ./volumes/pgdata:/var/lib/postgresql/data
+      - ./volumes/pgdata:/var/lib/postgresql
       - ./volumes/pgsocket:/var/run/postgresql
       - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
 
