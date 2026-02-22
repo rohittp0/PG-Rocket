@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  PG_VERSION: "18"
+  POSTGIS_VERSION: "3.6"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,11 +27,11 @@ jobs:
           context: .
           push: true
           build-args: |
-            PG_VERSION=18
-            POSTGIS_VERSION=3.6
+            PG_VERSION=${{ env.PG_VERSION }}
+            POSTGIS_VERSION=${{ env.POSTGIS_VERSION }}
           tags: |
             rohittp0/pg-rocket:latest
-            rohittp0/pg-rocket:pg18-latest
+            rohittp0/pg-rocket:pg${{ env.PG_VERSION }}-${{ env.POSTGIS_VERSION }}
             rohittp0/pg-rocket:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
