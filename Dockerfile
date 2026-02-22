@@ -1,17 +1,21 @@
-FROM debian:bookworm-slim
+ARG PG_VERSION=18
+ARG POSTGIS_VERSION=3.6
+
+FROM postgis/postgis:${PG_VERSION}-${POSTGIS_VERSION}
+
+ARG PG_VERSION
+ENV PG_VERSION=${PG_VERSION}
 
 LABEL authors="rohittp"
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates gnupg curl && \
-    echo "deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends pgbackrest tzdata bash coreutils util-linux curl jq && \
+    apt-get install -y --no-install-recommends pgbackrest cron jq curl && \
     rm -rf /var/lib/apt/lists/*
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY pg-rocket-entrypoint.sh backup.sh restore.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/pg-rocket-entrypoint.sh \
+             /usr/local/bin/backup.sh \
+             /usr/local/bin/restore.sh
 
-ENTRYPOINT ["/entrypoint.sh"]
-
+ENTRYPOINT ["pg-rocket-entrypoint.sh"]
+CMD ["postgres"]

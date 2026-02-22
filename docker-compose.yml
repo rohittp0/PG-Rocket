@@ -1,19 +1,14 @@
 services:
   postgres:
-    platform: linux/amd64
-    image: postgis/postgis:18-3.6
+    build:
+      context: .
+      args:
+        PG_VERSION: 18
+        POSTGIS_VERSION: "3.6"
     env_file: ".env"
+    environment:
+      PG_AUTO_INIT: "1"
     volumes:
       - ./volumes/pgdata:/var/lib/postgresql
       - ./volumes/pgsocket:/var/run/postgresql
-      - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
-
-  backup:
-    build: .
-    depends_on:
-      - postgres
-    env_file: ".env"
-    volumes:
-      - ./volumes/pgdata:/var/lib/postgresql:ro
-      - ./volumes/pgsocket:/var/run/postgresql
-      - ./volumes/backup_state:/state
+#      - ./seed.sql:/docker-entrypoint-initdb.d/20-seed.sql:ro
