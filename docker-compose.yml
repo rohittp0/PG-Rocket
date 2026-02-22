@@ -1,5 +1,6 @@
 services:
   postgres:
+    platform: linux/amd64
     build:
       context: .
       args:
@@ -10,4 +11,4 @@ services:
       PG_AUTO_INIT: "1"
     volumes:
       - ./volumes/pgdata:/var/lib/postgresql
-#      - ./seed.sql:/docker-entrypoint-initdb.d/20-seed.sql:ro
+      - ./seed.sql:/docker-entrypoint-initdb.d/20-seed.sql:ro

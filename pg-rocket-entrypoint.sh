@@ -10,6 +10,59 @@ set -euo pipefail
 : "${POSTGRES_DB:?POSTGRES_DB is required}"
 : "${POSTGRES_USER:?POSTGRES_USER is required}"
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+: "${PGDATA:?PGDATA is required}"
+
+PGDATA_PARENT="$(dirname "${PGDATA}")"
+PGDATA_ROOT="$(dirname "${PGDATA_PARENT}")"
+
+permission_fix_hint() {
+  cat <<EOF
+chown -R postgres:postgres "${PGDATA_PARENT}" && chmod 755 "${PGDATA_ROOT}" && chmod 700 "${PGDATA_PARENT}" "${PGDATA}"
+EOF
+}
+
+fail_pgdata_permission() {
+  local path="$1"
+  local reason="$2"
+  cat >&2 <<EOF
+ERROR: PGDATA startup preflight failed.
+Path: ${path}
+Required user: postgres
+Failure: ${reason}
+Suggested fix:
+  $(permission_fix_hint)
+EOF
+  exit 1
+}
+
+normalize_pgdata_permissions() {
+  if [ "$(id -u)" -ne 0 ]; then
+    fail_pgdata_permission "${PGDATA}" "entrypoint must run as root to normalize PGDATA ownership and permissions."
+  fi
+
+  mkdir -p "${PGDATA_PARENT}" "${PGDATA}" \
+    || fail_pgdata_permission "${PGDATA}" "unable to create PGDATA directories."
+  chown -R postgres:postgres "${PGDATA_PARENT}" \
+    || fail_pgdata_permission "${PGDATA_PARENT}" "unable to set ownership to postgres:postgres."
+  chmod 755 "${PGDATA_ROOT}" \
+    || fail_pgdata_permission "${PGDATA_ROOT}" "unable to set mode 755."
+  chmod 700 "${PGDATA_PARENT}" "${PGDATA}" \
+    || fail_pgdata_permission "${PGDATA}" "unable to set mode 700 on PGDATA path."
+}
+
+assert_postgres_pgdata_access() {
+  gosu postgres test -x "${PGDATA_ROOT}" \
+    || fail_pgdata_permission "${PGDATA_ROOT}" "postgres cannot traverse this directory."
+  gosu postgres test -x "${PGDATA_PARENT}" \
+    || fail_pgdata_permission "${PGDATA_PARENT}" "postgres cannot traverse this directory."
+  gosu postgres test -x "${PGDATA}" \
+    || fail_pgdata_permission "${PGDATA}" "postgres cannot traverse this directory."
+
+  if [ -e "${PGDATA}/PG_VERSION" ]; then
+    gosu postgres test -r "${PGDATA}/PG_VERSION" \
+      || fail_pgdata_permission "${PGDATA}/PG_VERSION" "postgres cannot read PG_VERSION."
+  fi
+}
 
 if [ "${ENABLE_DB_BACKUP:-}" = "true" ]; then
 
@@ -32,11 +85,14 @@ if [ "${ENABLE_DB_BACKUP:-}" = "true" ]; then
 : "${BACKUP_RETAIN_COUNT:=1}"
 : "${MAX_RETRIES:=5}"
 : "${RETRY_SLEEP_SECONDS:=60}"
+: "${PRIMARY_READY_TIMEOUT_SECONDS:=300}"
+: "${PGBACKREST_LOCK_PATH:=/tmp/pgbackrest}"
 
-export S3_REGION BACKUP_CRON BACKUP_RETAIN_COUNT MAX_RETRIES RETRY_SLEEP_SECONDS
+export S3_REGION BACKUP_CRON BACKUP_RETAIN_COUNT MAX_RETRIES RETRY_SLEEP_SECONDS PGBACKREST_LOCK_PATH
 
 LOG_DIR="/var/log/pgbackrest"
-mkdir -p "${LOG_DIR}" /etc/pgbackrest
+mkdir -p "${LOG_DIR}" /etc/pgbackrest "${PGBACKREST_LOCK_PATH}"
+chown -R postgres:postgres "${LOG_DIR}" "${PGBACKREST_LOCK_PATH}"
 
 # -------------------------
 # 3. Write pgbackrest.conf
@@ -61,6 +117,7 @@ repo1-retention-full=${BACKUP_RETAIN_COUNT}
 
 compress-type=zst
 process-max=4
+lock-path=${PGBACKREST_LOCK_PATH}
 
 [main]
 pg1-path=${PGDATA}
@@ -138,10 +195,28 @@ fi
 # 9. Post-start background task
 # -------------------------
 (
-  until pg_isready -q -h /var/run/postgresql -U "${POSTGRES_USER}"; do
+  until pg_isready -q -h /var/run/postgresql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"; do
     sleep 2
   done
   sleep 3
+
+  # During restore startup the cluster can be up but still in recovery.
+  # Wait for read-write primary mode before running stanza/create backup setup.
+  waited=0
+  while true; do
+    recovery_state="$(psql -h /var/run/postgresql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d '[:space:]' || echo "t")"
+    if [ "${recovery_state}" = "f" ]; then
+      break
+    fi
+
+    if [ "${waited}" -ge "${PRIMARY_READY_TIMEOUT_SECONDS}" ]; then
+      echo "pg-rocket: timed out waiting for primary mode after ${PRIMARY_READY_TIMEOUT_SECONDS}s; skipping post-start stanza/backup setup."
+      exit 0
+    fi
+
+    sleep 2
+    waited=$((waited + 2))
+  done
 
   # Check archive_mode
   archive_mode="$(psql -h /var/run/postgresql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "SHOW archive_mode;" 2>/dev/null || echo "off")"
@@ -158,13 +233,13 @@ Run: docker compose restart" \
   fi
 
   # Create/verify stanza
-  if ! pgbackrest --stanza=main stanza-create 2>/dev/null; then
-    pgbackrest --stanza=main stanza-delete --force 2>/dev/null || true
-    pgbackrest --stanza=main stanza-create 2>/dev/null || true
+  if ! gosu postgres pgbackrest --stanza=main stanza-create 2>/dev/null; then
+    gosu postgres pgbackrest --stanza=main stanza-delete --force 2>/dev/null || true
+    gosu postgres pgbackrest --stanza=main stanza-create 2>/dev/null || true
   fi
 
   # If no full backup exists yet, run one now
-  full_count="$(pgbackrest --stanza=main info --output=json \
+  full_count="$(gosu postgres pgbackrest --stanza=main info --output=json \
     | jq '[.[0].backup[] | select(.type == "full")] | length' 2>/dev/null || echo 0)"
   if [ "${full_count}" -eq 0 ]; then
     echo "pg-rocket: no full backup found, running initial backup..."
@@ -179,4 +254,6 @@ fi # end ENABLE_DB_BACKUP
 # -------------------------
 # 10. Hand off to official postgres entrypoint
 # -------------------------
+normalize_pgdata_permissions
+assert_postgres_pgdata_access
 exec docker-entrypoint.sh "$@"

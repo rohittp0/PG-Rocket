@@ -16,6 +16,58 @@ mkdir -p "${LOG_DIR}"
 
 : "${PGDATA:?PGDATA is not set}"
 
+PGDATA_PARENT="$(dirname "${PGDATA}")"
+PGDATA_ROOT="$(dirname "${PGDATA_PARENT}")"
+
+permission_fix_hint() {
+  cat <<EOF
+chown -R postgres:postgres "${PGDATA_PARENT}" && chmod 755 "${PGDATA_ROOT}" && chmod 700 "${PGDATA_PARENT}" "${PGDATA}"
+EOF
+}
+
+fail_pgdata_permission() {
+  local path="$1"
+  local reason="$2"
+  cat >&2 <<EOF
+ERROR: PGDATA permission check failed.
+Path: ${path}
+Required user: postgres
+Failure: ${reason}
+Suggested fix:
+  $(permission_fix_hint)
+EOF
+  exit 1
+}
+
+normalize_pgdata_permissions() {
+  if [ "$(id -u)" -ne 0 ]; then
+    fail_pgdata_permission "${PGDATA}" "restore.sh must run as root to normalize PGDATA ownership and permissions."
+  fi
+
+  mkdir -p "${PGDATA_PARENT}" "${PGDATA}" \
+    || fail_pgdata_permission "${PGDATA}" "unable to create PGDATA directories."
+  chown -R postgres:postgres "${PGDATA_PARENT}" \
+    || fail_pgdata_permission "${PGDATA_PARENT}" "unable to set ownership to postgres:postgres."
+  chmod 755 "${PGDATA_ROOT}" \
+    || fail_pgdata_permission "${PGDATA_ROOT}" "unable to set mode 755."
+  chmod 700 "${PGDATA_PARENT}" "${PGDATA}" \
+    || fail_pgdata_permission "${PGDATA}" "unable to set mode 700 on PGDATA path."
+}
+
+assert_postgres_pgdata_access() {
+  gosu postgres test -x "${PGDATA_ROOT}" \
+    || fail_pgdata_permission "${PGDATA_ROOT}" "postgres cannot traverse this directory."
+  gosu postgres test -x "${PGDATA_PARENT}" \
+    || fail_pgdata_permission "${PGDATA_PARENT}" "postgres cannot traverse this directory."
+  gosu postgres test -x "${PGDATA}" \
+    || fail_pgdata_permission "${PGDATA}" "postgres cannot traverse this directory."
+
+  if [ -e "${PGDATA}/PG_VERSION" ]; then
+    gosu postgres test -r "${PGDATA}/PG_VERSION" \
+      || fail_pgdata_permission "${PGDATA}/PG_VERSION" "postgres cannot read PG_VERSION."
+  fi
+}
+
 # -------------------------
 # Fetch and display backups
 # -------------------------
@@ -81,14 +133,9 @@ if [ -S /var/run/postgresql/.s.PGSQL.5432 ]; then
   exit 1
 fi
 
-# Check pgdata is writable
-if [ -d "${PGDATA}" ]; then
-  if ! touch "${PGDATA}/.restore_test" 2>/dev/null; then
-    echo "ERROR: PGDATA directory is not writable."
-    exit 1
-  fi
-  rm -f "${PGDATA}/.restore_test"
-fi
+# Normalize and verify path permissions before restore starts.
+normalize_pgdata_permissions
+assert_postgres_pgdata_access
 
 # -------------------------
 # Confirm
@@ -108,37 +155,24 @@ echo ""
 echo "Restoring backup ${backup_label}..."
 echo ""
 
-restore_log="${LOG_DIR}/restore_$(date +%F_%H%M%S).log"
-
-pgbackrest --stanza=main restore --set="${backup_label}" --delta --link-all \
-  >"${restore_log}" 2>&1 &
-restore_pid=$!
-
-# Show last log line as a live progress indicator
-while kill -0 "${restore_pid}" 2>/dev/null; do
-  last_line="$(tail -1 "${restore_log}" 2>/dev/null || true)"
-  if [ -n "${last_line}" ]; then
-    printf "\r\033[K%s" "${last_line}"
-  fi
-  sleep 1
-done
-
 set +e
-wait "${restore_pid}"
+pgbackrest \
+  --stanza=main \
+  --log-level-console=detail \
+  --log-level-file=off \
+  restore --set="${backup_label}" --delta --link-all
 rc=$?
 set -e
 
-printf "\r\033[K"
 echo ""
 
 if [ "${rc}" -eq 0 ]; then
-  echo "Fixing ownership..."
-  chown -R postgres:postgres "${PGDATA}"
-  echo ""
+  normalize_pgdata_permissions
+  assert_postgres_pgdata_access
   echo "Restore completed successfully."
-  echo "The entrypoint will detect PG_VERSION and start postgres automatically."
+  echo "Permissions validated for postgres on ${PGDATA}."
 else
-  echo "Restore FAILED (exit code ${rc}). Check log: ${restore_log}"
+  echo "Restore FAILED (exit code ${rc}). See console output above."
 fi
 
 echo ""

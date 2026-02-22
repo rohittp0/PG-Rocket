@@ -34,8 +34,16 @@ format_duration() {
   fi
 }
 
+run_pgbackrest() {
+  if [ "$(id -u)" -eq 0 ]; then
+    gosu postgres pgbackrest "$@"
+  else
+    pgbackrest "$@"
+  fi
+}
+
 latest_backup_stats() {
-  pgbackrest --stanza="main" info --output=json \
+  run_pgbackrest --stanza="main" info --output=json \
     | jq -r '
       def hbytes($n):
         if ($n // 0) < 1024 then "\(($n // 0) | floor) B"
@@ -88,7 +96,7 @@ while [ "${attempt}" -lt "${MAX_RETRIES}" ]; do
   attempt=$((attempt + 1))
 
   set +e
-  gosu postgres pgbackrest --stanza=main backup --type=full >"${out_file}" 2>&1
+  run_pgbackrest --stanza=main backup --type=full >"${out_file}" 2>&1
   rc=$?
   set -e
 
