@@ -10,5 +10,4 @@ services:
       PG_AUTO_INIT: "1"
     volumes:
       - ./volumes/pgdata:/var/lib/postgresql
-      - ./volumes/pgsocket:/var/run/postgresql
 #      - ./seed.sql:/docker-entrypoint-initdb.d/20-seed.sql:ro

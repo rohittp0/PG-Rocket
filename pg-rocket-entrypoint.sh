@@ -163,6 +163,14 @@ Run: docker compose restart" \
     pgbackrest --stanza=main stanza-create 2>/dev/null || true
   fi
 
+  # If no full backup exists yet, run one now
+  full_count="$(pgbackrest --stanza=main info --output=json \
+    | jq '[.[0].backup[] | select(.type == "full")] | length' 2>/dev/null || echo 0)"
+  if [ "${full_count}" -eq 0 ]; then
+    echo "pg-rocket: no full backup found, running initial backup..."
+    /usr/local/bin/backup.sh || true
+  fi
+
   echo "pg-rocket: post-start setup complete."
 ) &
 
