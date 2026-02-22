@@ -68,6 +68,41 @@ assert_postgres_pgdata_access() {
   fi
 }
 
+backup_auth_config() {
+  SAVED_PG_HBA=""
+  SAVED_PG_IDENT=""
+
+  if [ -f "${PGDATA}/pg_hba.conf" ]; then
+    SAVED_PG_HBA="/tmp/pg_hba.conf.pre_restore.$$"
+    cp -a "${PGDATA}/pg_hba.conf" "${SAVED_PG_HBA}"
+  fi
+
+  if [ -f "${PGDATA}/pg_ident.conf" ]; then
+    SAVED_PG_IDENT="/tmp/pg_ident.conf.pre_restore.$$"
+    cp -a "${PGDATA}/pg_ident.conf" "${SAVED_PG_IDENT}"
+  fi
+}
+
+restore_auth_config() {
+  local restored=0
+
+  if [ -n "${SAVED_PG_HBA:-}" ] && [ -f "${SAVED_PG_HBA}" ]; then
+    cp -a "${SAVED_PG_HBA}" "${PGDATA}/pg_hba.conf"
+    restored=1
+  fi
+
+  if [ -n "${SAVED_PG_IDENT:-}" ] && [ -f "${SAVED_PG_IDENT}" ]; then
+    cp -a "${SAVED_PG_IDENT}" "${PGDATA}/pg_ident.conf"
+    restored=1
+  fi
+
+  rm -f "${SAVED_PG_HBA:-}" "${SAVED_PG_IDENT:-}" || true
+
+  if [ "${restored}" -eq 1 ]; then
+    echo "Restored pre-restore pg_hba.conf/pg_ident.conf to preserve access rules."
+  fi
+}
+
 # -------------------------
 # Fetch and display backups
 # -------------------------
@@ -136,6 +171,7 @@ fi
 # Normalize and verify path permissions before restore starts.
 normalize_pgdata_permissions
 assert_postgres_pgdata_access
+backup_auth_config
 
 # -------------------------
 # Confirm
@@ -167,6 +203,7 @@ set -e
 echo ""
 
 if [ "${rc}" -eq 0 ]; then
+  restore_auth_config
   normalize_pgdata_permissions
   assert_postgres_pgdata_access
   echo "Restore completed successfully."

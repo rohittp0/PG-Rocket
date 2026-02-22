@@ -170,6 +170,7 @@ docker compose exec postgres gosu postgres pgbackrest --stanza=main info
 - Lists backup sets from `pgbackrest info --output=json`.
 - Prompts user to select a backup label.
 - Enforces and validates `PGDATA` permissions before and after restore.
+- Preserves local `pg_hba.conf`/`pg_ident.conf` (if present) to avoid breaking existing app connectivity.
 - Runs restore with detailed console logs (not file-tail simulation):
 
 ```bash
@@ -247,6 +248,14 @@ The stack now sets lock path and ownership explicitly. If needed:
 ```bash
 docker compose exec postgres bash -lc 'mkdir -p /tmp/pgbackrest && chown -R postgres:postgres /tmp/pgbackrest'
 ```
+
+### `no pg_hba.conf entry for host ..., no encryption` after restore
+
+Cause: restored cluster auth rules can differ from your current app/network setup.
+
+Current behavior: `restore.sh` now keeps pre-restore `pg_hba.conf` and `pg_ident.conf` (when they exist), then restores them after data restore.
+
+If you already hit this error, add an allow rule in `PGDATA/pg_hba.conf` for your app CIDR and reload PostgreSQL. Future restores will preserve your local auth files.
 
 ### Backup seems slow for a small logical DB
 
