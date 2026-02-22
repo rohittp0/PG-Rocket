@@ -67,13 +67,8 @@ assert_postgres_pgdata_access() {
 if [ "${ENABLE_DB_BACKUP:-}" = "true" ]; then
 
 # -------------------------
-# 1. Validate backup-related env vars
+# 1. Validate backup-only env vars
 # -------------------------
-: "${STACK_NAME:?STACK_NAME is required}"
-: "${S3_ENDPOINT:?S3_ENDPOINT is required}"
-: "${S3_BUCKET:?S3_BUCKET is required}"
-: "${S3_KEY:?S3_KEY is required}"
-: "${S3_SECRET:?S3_SECRET is required}"
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}"
 : "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID is required}"
 
@@ -86,45 +81,15 @@ if [ "${ENABLE_DB_BACKUP:-}" = "true" ]; then
 : "${MAX_RETRIES:=5}"
 : "${RETRY_SLEEP_SECONDS:=60}"
 : "${PRIMARY_READY_TIMEOUT_SECONDS:=300}"
-: "${PGBACKREST_LOCK_PATH:=/tmp/pgbackrest}"
 
-export S3_REGION BACKUP_CRON BACKUP_RETAIN_COUNT MAX_RETRIES RETRY_SLEEP_SECONDS PGBACKREST_LOCK_PATH
+export S3_REGION BACKUP_CRON BACKUP_RETAIN_COUNT MAX_RETRIES RETRY_SLEEP_SECONDS
 
 LOG_DIR="/var/log/pgbackrest"
-mkdir -p "${LOG_DIR}" /etc/pgbackrest "${PGBACKREST_LOCK_PATH}"
-chown -R postgres:postgres "${LOG_DIR}" "${PGBACKREST_LOCK_PATH}"
 
 # -------------------------
-# 3. Write pgbackrest.conf
+# 3. Generate pgbackrest config (shared with restore.sh)
 # -------------------------
-cat > /etc/pgbackrest/pgbackrest.conf <<EOF
-[global]
-log-level-console=info
-log-level-file=detail
-log-path=${LOG_DIR}
-
-repo1-type=s3
-repo1-s3-endpoint=${S3_ENDPOINT}
-repo1-s3-bucket=${S3_BUCKET}
-repo1-s3-key=${S3_KEY}
-repo1-s3-key-secret=${S3_SECRET}
-repo1-s3-region=${S3_REGION}
-repo1-s3-uri-style=path
-
-repo1-path=/pg/${STACK_NAME}/${POSTGRES_DB}
-
-repo1-retention-full=${BACKUP_RETAIN_COUNT}
-
-compress-type=zst
-process-max=4
-lock-path=${PGBACKREST_LOCK_PATH}
-
-[main]
-pg1-path=${PGDATA}
-pg1-socket-path=/var/run/postgresql
-pg1-user=${POSTGRES_USER}
-pg1-database=${POSTGRES_DB}
-EOF
+/usr/local/bin/setup-pgbackrest.sh
 
 # -------------------------
 # 4. Init script for WAL archiving (runs only on fresh DB init)

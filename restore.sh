@@ -16,6 +16,12 @@ mkdir -p "${LOG_DIR}"
 
 : "${PGDATA:?PGDATA is not set}"
 
+# Auto-generate pgbackrest config if missing (e.g. staging with no backup enabled)
+if [ ! -f /etc/pgbackrest/pgbackrest.conf ]; then
+  echo "pgbackrest config not found, generating..."
+  /usr/local/bin/setup-pgbackrest.sh
+fi
+
 PGDATA_PARENT="$(dirname "${PGDATA}")"
 PGDATA_ROOT="$(dirname "${PGDATA_PARENT}")"
 
@@ -204,6 +210,20 @@ echo ""
 
 if [ "${rc}" -eq 0 ]; then
   restore_auth_config
+
+  # If backups are not enabled on this instance, disable WAL archiving so the
+  # restored database does not push WAL to the production S3 repo.
+  if [ "${ENABLE_DB_BACKUP:-}" != "true" ]; then
+    auto_conf="${PGDATA}/postgresql.auto.conf"
+    if [ -f "${auto_conf}" ]; then
+      echo "Backup not enabled — disabling WAL archiving in postgresql.auto.conf..."
+      # Remove existing archive settings then append safe defaults
+      sed -i '/^\s*archive_mode\s*=/d; /^\s*archive_command\s*=/d' "${auto_conf}"
+      echo "archive_mode = 'off'" >> "${auto_conf}"
+      echo "archive_command = '/bin/true'" >> "${auto_conf}"
+    fi
+  fi
+
   normalize_pgdata_permissions
   assert_postgres_pgdata_access
   echo "Restore completed successfully."

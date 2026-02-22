@@ -12,10 +12,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends pgbackrest cron jq curl && \
     rm -rf /var/lib/apt/lists/*
 
-COPY pg-rocket-entrypoint.sh backup.sh restore.sh /usr/local/bin/
+COPY pg-rocket-entrypoint.sh backup.sh restore.sh setup-pgbackrest.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/pg-rocket-entrypoint.sh \
              /usr/local/bin/backup.sh \
-             /usr/local/bin/restore.sh
+             /usr/local/bin/restore.sh \
+             /usr/local/bin/setup-pgbackrest.sh
 
 ENTRYPOINT ["pg-rocket-entrypoint.sh"]
 CMD ["postgres"]
