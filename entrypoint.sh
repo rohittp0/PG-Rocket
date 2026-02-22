@@ -10,10 +10,11 @@ set -euo pipefail
 : "${POSTGRES_USER:?}"
 : "${POSTGRES_PASSWORD:?}"
 
-: "${SPACES_ENDPOINT:?}"   # nyc3.digitaloceanspaces.com
-: "${SPACES_BUCKET:?}"     # b-space
+: "${SPACES_ENDPOINT:?}"   # e.g. s3.us-east-1.wasabisys.com
+: "${SPACES_BUCKET:?}"
 : "${SPACES_KEY:?}"
 : "${SPACES_SECRET:?}"
+: "${SPACES_REGION:=us-east-1}"
 
 : "${TELEGRAM_BOT_TOKEN:?}"
 : "${TELEGRAM_CHAT_ID:?}"
@@ -97,7 +98,7 @@ repo1-s3-endpoint=${SPACES_ENDPOINT}
 repo1-s3-bucket=${SPACES_BUCKET}
 repo1-s3-key=${SPACES_KEY}
 repo1-s3-key-secret=${SPACES_SECRET}
-repo1-s3-region=us-east-1
+repo1-s3-region=${SPACES_REGION}
 repo1-s3-uri-style=path
 
 # prefix backups by stack
@@ -119,10 +120,19 @@ EOF
 }
 
 ensure_stanza() {
-  # If stanza isn't created yet, create it.
-  # We’ll try info; if it fails, run stanza-create.
-  if ! pgbackrest --stanza="main" info >/dev/null 2>&1; then
-    pgbackrest --stanza="main" stanza-create
+  local stanza="main"
+
+  # Try a backup info check to see if the stanza is usable.
+  # This catches: no stanza, wrong system-id, corrupt metadata.
+  if pgbackrest --stanza="${stanza}" check 2>/dev/null; then
+    return 0
+  fi
+
+  # If check fails, try a non-destructive create.
+  # Avoid deleting repo metadata automatically on auth/policy errors.
+  if ! pgbackrest --stanza="${stanza}" stanza-create; then
+    echo "ERROR: pgBackRest stanza initialization failed. Check S3 credentials/policy and repo access." >&2
+    return 1
   fi
 }
 
