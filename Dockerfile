@@ -9,7 +9,7 @@ ENV PG_VERSION=${PG_VERSION}
 LABEL authors="rohittp"
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends pgbackrest cron jq curl && \
+    apt-get install -y --no-install-recommends pgbackrest cron jq curl gosu && \
     rm -rf /var/lib/apt/lists/*
 
 COPY pg-rocket-entrypoint.sh backup.sh restore.sh setup-pgbackrest.sh /usr/local/bin/
