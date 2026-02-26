@@ -197,12 +197,21 @@ echo ""
 echo "Restoring backup ${backup_label}..."
 echo ""
 
+restore_opts=(--set="${backup_label}" --delta --link-all)
+
+# When backups are not enabled on this instance, prevent the restored cluster
+# from archiving WAL into the production repo (which would create a new
+# timeline and block future restores).
+if [ "${ENABLE_DB_BACKUP:-}" != "true" ]; then
+  restore_opts+=(--archive-mode=off)
+fi
+
 set +e
 pgbackrest \
   --stanza=main \
   --log-level-console=detail \
   --log-level-file=off \
-  restore --set="${backup_label}" --delta --link-all
+  restore "${restore_opts[@]}"
 rc=$?
 set -e
 
