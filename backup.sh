@@ -5,6 +5,11 @@ set -euo pipefail
 # backup.sh — called by cron, runs a full pgbackrest backup with retries
 # =========================================================================
 
+# Cron runs with a minimal PATH that excludes /usr/local/bin (where gosu
+# lives in the official PostgreSQL image). Ensure a sane PATH before
+# anything else.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # Source environment (written by pg-rocket-entrypoint.sh)
 source /etc/pg-rocket-env.sh
 
