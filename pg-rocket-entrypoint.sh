@@ -133,6 +133,7 @@ chmod 600 "${ENV_FILE}"
 # 6. Install cron job
 # -------------------------
 cat > /etc/cron.d/pg-rocket-backup <<EOF
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ${BACKUP_CRON} root /usr/local/bin/backup.sh >> ${LOG_DIR}/cron.log 2>&1
 EOF
 chmod 644 /etc/cron.d/pg-rocket-backup
