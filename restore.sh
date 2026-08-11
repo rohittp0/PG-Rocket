@@ -110,10 +110,10 @@ restore_auth_config() {
 }
 
 # -------------------------
-# Fetch and display backups
+# Fetch repository state
 # -------------------------
 echo ""
-echo "Fetching available backups..."
+echo "Fetching repository information..."
 echo ""
 
 backup_json="$(pgbackrest --stanza=main info --output=json)"
@@ -125,44 +125,162 @@ if [ "${backup_count}" -eq 0 ]; then
   exit 1
 fi
 
-echo "${backup_json}" | jq -r '
-  def hbytes($n):
-    if ($n // 0) < 1024 then "\($n // 0) B"
-    elif ($n // 0) < 1048576 then "\(((($n / 1024) * 10) | floor) / 10) KiB"
-    elif ($n // 0) < 1073741824 then "\(((($n / 1048576) * 10) | floor) / 10) MiB"
-    else "\(((($n / 1073741824) * 100) | floor) / 100) GiB"
-    end;
-  .[0].backup | to_entries[] |
-  "  [\(.key + 1)] \(.value.label)  \(.value.type | ascii_upcase)  \(.value.timestamp.start | strftime("%Y-%m-%d %H:%M UTC"))  size=\(hbytes(.value.info.size))  delta=\(hbytes(.value.info.delta))"
-'
+format_epoch() {
+  date -u -d "@${1}" '+%Y-%m-%d %H:%M:%S+00'
+}
 
+# The oldest retained backup set bounds how far back recovery can reach: WAL
+# earlier than it was expired along with the backup set it belonged to.
+oldest_stop="$(echo "${backup_json}" | jq -r '.[0].backup[0].timestamp.stop')"
+
+# Distinct timelines in the repository, taken from the first 8 hex digits of each
+# backup's starting WAL segment. More than one means an earlier recovery was
+# promoted and forked history.
+timeline_count="$(echo "${backup_json}" \
+  | jq -r '[.[0].backup[].archive.start // empty | .[0:8]] | unique | length')"
+
+list_backups() {
+  echo "${backup_json}" | jq -r '
+    def hbytes($n):
+      if ($n // 0) < 1024 then "\($n // 0) B"
+      elif ($n // 0) < 1048576 then "\(((($n / 1024) * 10) | floor) / 10) KiB"
+      elif ($n // 0) < 1073741824 then "\(((($n / 1048576) * 10) | floor) / 10) MiB"
+      else "\(((($n / 1073741824) * 100) | floor) / 100) GiB"
+      end;
+    .[0].backup | to_entries[] |
+    "  [\(.key + 1)] \(.value.label)  \(.value.type | ascii_upcase)  \(.value.timestamp.start | strftime("%Y-%m-%d %H:%M UTC"))  size=\(hbytes(.value.info.size))  delta=\(hbytes(.value.info.delta))"
+  '
+}
+
+# -------------------------
+# Mode selection
+# -------------------------
+echo "Recovery modes:"
 echo ""
+echo "  [1] Restore a backup set    — rebuild from this backup, then roll forward to the newest state"
+echo "  [2] Point-in-time recovery  — rebuild and stop at a chosen instant"
 echo "  [0] Cancel"
 echo ""
 
-# -------------------------
-# Selection
-# -------------------------
-read -rp "Select backup to restore [0-${backup_count}]: " choice
+read -rp "Select mode [0-2]: " mode
 
-if [ "${choice}" = "0" ] || [ -z "${choice}" ]; then
-  echo "Cancelled."
-  exit 0
+case "${mode}" in
+  0|"") echo "Cancelled."; exit 0 ;;
+  1|2) ;;
+  *) echo "Invalid selection."; exit 1 ;;
+esac
+
+if [ "${mode}" = "1" ]; then
+  # -------------------------
+  # Mode 1 — restore a specific backup set
+  # -------------------------
+  echo ""
+  echo "Available backup sets:"
+  echo ""
+  list_backups
+  echo ""
+  echo "  [0] Cancel"
+  echo ""
+
+  read -rp "Select backup to restore [0-${backup_count}]: " choice
+
+  if [ "${choice}" = "0" ] || [ -z "${choice}" ]; then
+    echo "Cancelled."
+    exit 0
+  fi
+
+  if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [ "${choice}" -lt 1 ] || [ "${choice}" -gt "${backup_count}" ]; then
+    echo "Invalid selection."
+    exit 1
+  fi
+
+  idx=$((choice - 1))
+  backup_label="$(echo "${backup_json}" | jq -r ".[0].backup[${idx}].label")"
+  backup_type="$(echo "${backup_json}" | jq -r ".[0].backup[${idx}].type | ascii_upcase")"
+  backup_time="$(echo "${backup_json}" | jq -r ".[0].backup[${idx}].timestamp.start | strftime(\"%Y-%m-%d %H:%M UTC\")")"
+
+  # No --type is passed, so pgBackRest uses type=default: "recover to the end of
+  # the archive stream". Recovery does NOT stop at the selected backup — it
+  # rebuilds from it and then replays every WAL segment archived since. That is
+  # the right behaviour for disaster recovery, but it means picking an older
+  # backup set here does not travel back in time. Mode 2 is what does that.
+  restore_opts=(--set="${backup_label}" --delta --link-all)
+  restore_desc="Restoring backup set ${backup_label}..."
+  restore_summary="Mode       : restore backup set
+Backup set : ${backup_label} (${backup_type}, started ${backup_time})
+Recovery   : rolls forward to the NEWEST state in the archive, not to this
+             backup's own point in time"
+
+  if [ "${idx}" -ne "$((backup_count - 1))" ]; then
+    restore_summary="${restore_summary}
+
+             You picked a backup set that is not the newest. Recovery will
+             still roll forward to the present. If you meant to go back to an
+             earlier moment, cancel and use point-in-time recovery instead."
+  fi
+else
+  # -------------------------
+  # Mode 2 — point-in-time recovery
+  # -------------------------
+  echo ""
+  echo "Recoverable window:"
+  echo ""
+  echo "  Earliest : $(format_epoch "${oldest_stop}")  (oldest retained backup set)"
+  echo "  Latest   : $(date -u '+%Y-%m-%d %H:%M:%S+00')  (now)"
+  echo ""
+  echo "Targets outside this window cannot be satisfied — the WAL is gone."
+  echo "Format: YYYY-MM-DD HH:MM:SS+00"
+  echo ""
+
+  read -rp "Recovery target timestamp (blank to cancel): " target_input
+
+  if [ -z "${target_input}" ]; then
+    echo "Cancelled."
+    exit 0
+  fi
+
+  if ! target_epoch="$(date -u -d "${target_input}" +%s 2>/dev/null)"; then
+    echo "ERROR: could not parse '${target_input}' as a timestamp."
+    echo "       Expected format: YYYY-MM-DD HH:MM:SS+00"
+    exit 1
+  fi
+
+  now_epoch="$(date -u +%s)"
+
+  if [ "${target_epoch}" -lt "${oldest_stop}" ]; then
+    echo "ERROR: target $(format_epoch "${target_epoch}") precedes the oldest retained"
+    echo "       backup set ($(format_epoch "${oldest_stop}")). The WAL needed to reach"
+    echo "       that point has already been expired."
+    exit 1
+  fi
+
+  if [ "${target_epoch}" -gt "${now_epoch}" ]; then
+    echo "ERROR: target $(format_epoch "${target_epoch}") is in the future."
+    exit 1
+  fi
+
+  # pgBackRest selects the backup set itself for a time target, and the docs note
+  # that forcing --set is less reliable. Compute the likely choice for display
+  # only, so the operator can sanity-check before committing.
+  expected_label="$(echo "${backup_json}" \
+    | jq -r --argjson t "${target_epoch}" \
+        '[.[0].backup[] | select(.timestamp.stop <= $t)] | last | .label // "none"')"
+
+  if [ "${expected_label}" = "none" ]; then
+    echo "ERROR: no backup set completes before $(format_epoch "${target_epoch}")."
+    echo "       Recovery must start from a backup that predates the target."
+    exit 1
+  fi
+
+  target_string="$(format_epoch "${target_epoch}")"
+
+  restore_opts=(--delta --link-all --type=time --target="${target_string}" --target-action=promote)
+  restore_desc="Recovering to ${target_string}..."
+  restore_summary="Mode       : point-in-time recovery
+Target     : ${target_string}
+Backup set : ${expected_label} (expected — pgBackRest makes the final choice)
+On target  : promote — cluster comes up read-write on a NEW timeline"
 fi
-
-if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [ "${choice}" -lt 1 ] || [ "${choice}" -gt "${backup_count}" ]; then
-  echo "Invalid selection."
-  exit 1
-fi
-
-idx=$((choice - 1))
-backup_label="$(echo "${backup_json}" | jq -r ".[0].backup[${idx}].label")"
-backup_type="$(echo "${backup_json}" | jq -r ".[0].backup[${idx}].type | ascii_upcase")"
-backup_time="$(echo "${backup_json}" | jq -r ".[0].backup[${idx}].timestamp.start | strftime(\"%Y-%m-%d %H:%M UTC\")")"
-
-echo ""
-echo "Selected: ${backup_label} (${backup_type}, ${backup_time})"
-echo ""
 
 # -------------------------
 # Safety checks
@@ -182,6 +300,20 @@ backup_auth_config
 # -------------------------
 # Confirm
 # -------------------------
+echo ""
+echo "---------------------------------------------------------------"
+echo "${restore_summary}"
+echo "Target dir : ${PGDATA}"
+echo "---------------------------------------------------------------"
+
+if [ "${timeline_count}" -gt 1 ]; then
+  echo ""
+  echo "NOTE: this repository spans ${timeline_count} timelines, so a previous recovery"
+  echo "      was promoted at some point. Recovery follows the latest timeline by"
+  echo "      default, which may not be the branch you have in mind."
+fi
+
+echo ""
 echo "WARNING: This will REPLACE all data in ${PGDATA}."
 read -rp "Type 'yes' to confirm restore: " confirm
 
@@ -194,10 +326,8 @@ fi
 # Restore
 # -------------------------
 echo ""
-echo "Restoring backup ${backup_label}..."
+echo "${restore_desc}"
 echo ""
-
-restore_opts=(--set="${backup_label}" --delta --link-all)
 
 # When backups are not enabled on this instance, prevent the restored cluster
 # from archiving WAL into the production repo (which would create a new

@@ -77,7 +77,7 @@ The container reads variables from `.env` via Compose.
 | `ENABLE_DB_BACKUP` | `false` | Enable/disable backup feature block |
 | `S3_REGION` | `us-east-1` | S3 region |
 | `BACKUP_CRON` | `0 3 * * 2` | Cron schedule for `backup.sh` |
-| `BACKUP_RETAIN_COUNT` | `1` | `repo1-retention-full` |
+| `BACKUP_RETENTION_DAYS` | `90` | Recovery window in **days** (`repo1-retention-full` with `repo1-retention-full-type=time`) |
 | `MAX_RETRIES` | `5` | Backup retry attempts |
 | `RETRY_SLEEP_SECONDS` | `60` | Delay between backup retries |
 | `PRIMARY_READY_TIMEOUT_SECONDS` | `300` | Max wait for primary mode before post-start setup is skipped |
@@ -105,7 +105,7 @@ TELEGRAM_BOT_TOKEN=replace-me
 TELEGRAM_CHAT_ID=replace-me
 
 BACKUP_CRON=0 3 * * 2
-BACKUP_RETAIN_COUNT=1
+BACKUP_RETENTION_DAYS=90
 MAX_RETRIES=5
 RETRY_SLEEP_SECONDS=60
 PRIMARY_READY_TIMEOUT_SECONDS=300
@@ -151,6 +151,35 @@ If you want strict manual-restore-first startup, remove `PG_AUTO_INIT` from comp
 - Logs command output to `/var/log/pgbackrest/backup_YYYY-MM-DD_HHMMSS.log`.
 - Sends Telegram message on success/failure, including duration and latest backup stats.
 
+## Retention and Recovery Window
+
+Retention is **time-based**, not count-based:
+
+```ini
+repo1-retention-full-type=time
+repo1-retention-full=${BACKUP_RETENTION_DAYS}   # default 90
+```
+
+pgBackRest keeps every full backup inside the window, plus the newest full that predates it
+(needed to recover to the window's start). Critically, time-based retention also makes
+`repo1-retention-archive` default to retaining WAL back to the oldest retained full — which is
+what makes point-in-time recovery work across the whole window. Count-based retention kept only
+one backup set's worth of WAL, so PITR was effectively unavailable.
+
+Expiry runs as part of the `backup` command, so a stack whose backups have stalled does not
+delete itself.
+
+**Why 90 days.** It is Wasabi's minimum storage duration, not a recovery requirement. Objects
+deleted before day 90 are billed to day 90 regardless, so a shorter window discards recovery
+points that have already been paid for. Before shortening this to save money, read
+[docs/adr/0001-time-based-90-day-retention.md](./docs/adr/0001-time-based-90-day-retention.md) —
+it will not save money.
+
+> **Migrating from `BACKUP_RETAIN_COUNT`:** that variable counted backup sets;
+> `BACKUP_RETENTION_DAYS` counts days. It is deliberately **ignored** rather than reinterpreted,
+> because a leftover `BACKUP_RETAIN_COUNT=1` would otherwise have been read as a one-day window.
+> Remove it from your `.env`; the container warns on startup while it is still present.
+
 ### Manual Backup Command
 
 ```bash
@@ -165,19 +194,54 @@ docker compose exec postgres gosu postgres pgbackrest --stanza=main info
 
 ## Restore Behavior
 
-`restore.sh`:
+`restore.sh` offers two recovery modes.
 
-- Lists backup sets from `pgbackrest info --output=json`.
-- Prompts user to select a backup label.
-- Enforces and validates `PGDATA` permissions before and after restore.
-- Preserves local `pg_hba.conf`/`pg_ident.conf` (if present) to avoid breaking existing app connectivity.
-- Runs restore with detailed console logs (not file-tail simulation):
+**Mode 1 — restore a backup set.** Lists backup sets from `pgbackrest info --output=json`,
+prompts for a label, rebuilds from it, and then **rolls forward to the newest state in the
+archive**. No `--type` is passed, so pgBackRest uses `type=default`, documented as *"recover to
+the end of the archive stream"*.
+
+This is the disaster-recovery path: rebuild and lose as little as possible. It is **not** a way
+to travel back in time — selecting an older backup set still ends at the present, because all
+WAL archived since that backup is replayed. `restore.sh` warns you at the confirmation prompt
+when the selected set is not the newest. To land at an earlier moment, use mode 2.
 
 ```bash
-pgbackrest --stanza=main --log-level-console=detail --log-level-file=off restore --set="<label>" --delta --link-all
+pgbackrest --stanza=main --log-level-console=detail --log-level-file=off \
+  restore --set="<label>" --delta --link-all
 ```
 
-- Exits non-zero on failure and prints remediation guidance for permission issues.
+**Mode 2 — point-in-time recovery.** Prints the recoverable window, validates your timestamp
+against it, and recovers to that instant by replaying WAL.
+
+```bash
+pgbackrest --stanza=main --log-level-console=detail --log-level-file=off \
+  restore --delta --link-all --type=time --target="<YYYY-MM-DD HH:MM:SS+00>" --target-action=promote
+```
+
+Note that PITR deliberately does **not** pass `--set`. pgBackRest selects the backup set that
+can reach the target itself, which its documentation calls the reliable method; forcing a
+specific set can fail. `restore.sh` still shows you the set it expects to be chosen so you can
+sanity-check before confirming.
+
+Both modes:
+
+- Enforce and validate `PGDATA` permissions before and after restore.
+- Preserve local `pg_hba.conf`/`pg_ident.conf` (if present) to avoid breaking existing app connectivity.
+- Print a summary and require a typed `yes` before touching any data.
+- Warn when the repository spans more than one timeline (see below).
+- Exit non-zero on failure with remediation guidance for permission issues.
+
+### Timelines
+
+`--target-action=promote` brings the cluster up read-write as soon as the target is reached,
+which is what keeps your application working and lets the entrypoint's primary-ready check
+succeed. The trade-off is that promoting **forks a new timeline**, and that fork is committed
+once it happens.
+
+Recovery follows the *latest* timeline by default. If you have promoted a PITR before, a later
+recovery aimed at a moment before that fork may not follow the branch you expect. `restore.sh`
+detects multiple timelines in the repository and warns you at the confirmation prompt.
 
 ### Manual Restore Steps
 
